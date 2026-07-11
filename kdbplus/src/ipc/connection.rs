@@ -6,7 +6,7 @@ use super::serialize::ENCODING;
 use super::Result;
 use super::{qtype, K};
 use async_trait::async_trait;
-use hickory_resolver::TokioAsyncResolver;
+use hickory_resolver::Resolver;
 use io::BufRead;
 use once_cell::sync::Lazy;
 use sha1_smol::Sha1;
@@ -881,21 +881,24 @@ impl MessageHeader {
 /// - `port`: Port of the target q process
 async fn connect_tcp_impl(host: &str, port: u16) -> Result<TcpStream> {
     // DNS system resolver (should not fail)
-    let resolver =
-        TokioAsyncResolver::tokio_from_system_conf().expect("failed to create a resolver");
+    let resolver = Resolver::builder_tokio()
+        .expect("failed to read system DNS configuration")
+        .build()
+        .expect("failed to create a resolver");
 
     // Check if we were given an IP address
     let ips;
     if let Ok(ip) = host.parse::<IpAddr>() {
         ips = vec![ip.to_string()]
     } else {
-        // Resolve the given hostname
+        // Resolve the given hostname to IPv4 addresses
         ips = resolver
-            .ipv4_lookup(format!("{}.", host).as_str())
+            .lookup_ip(format!("{}.", host).as_str())
             .await
             .unwrap()
             .iter()
-            .map(|result| result.to_string())
+            .filter(|ip| ip.is_ipv4())
+            .map(|ip| ip.to_string())
             .collect()
     };
 
