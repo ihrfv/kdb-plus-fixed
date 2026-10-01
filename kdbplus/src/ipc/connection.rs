@@ -427,14 +427,8 @@ impl QStream {
     ) -> Result<Self> {
         match method {
             ConnectionMethod::TCP => {
-                let stream = connect_tcp(host, port, credential).await?;
-                let is_local = matches!(host, "localhost" | "127.0.0.1");
-                Ok(QStream::new(
-                    Box::new(stream),
-                    ConnectionMethod::TCP,
-                    false,
-                    is_local,
-                ))
+                let stream = connect_tcp_impl(host, port).await?;
+                QStream::from_tcp_stream(stream, credential).await
             }
             ConnectionMethod::TLS => {
                 let stream = connect_tls(host, port, credential).await?;
@@ -462,6 +456,45 @@ impl QStream {
             )
             .into()),
         }
+    }
+
+    /// Do the q handshake over a TCP stream the caller has already connected, and wrap it.
+    ///
+    /// [`connect`](QStream::connect) opens the socket itself, so a socket option it does not set
+    ///  cannot be set at all once the stream is wrapped. Connecting the stream yourself lets you set
+    ///  any of them first, such as TCP keepalive so that a peer that vanished without closing the
+    ///  connection is detected, or `TCP_NODELAY`. It also lets you resolve the host however you like.
+    ///
+    /// Whether the connection is local, which decides whether a large message is compressed, is
+    ///  read from the stream's peer address: a loopback address is local.
+    /// # Parameters
+    /// - `stream`: A connected TCP stream to the target q process.
+    /// - `credential`: Credential in the form of `username:password` to connect to the target q process.
+    /// # Example
+    /// ```no_run
+    /// use kdb_plus_fixed::ipc::*;
+    /// use tokio::net::TcpStream;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<()> {
+    ///     let stream = TcpStream::connect("127.0.0.1:5000").await?;
+    ///     // Any socket option goes here, before the handshake.
+    ///     stream.set_nodelay(true)?;
+    ///     let mut socket = QStream::from_tcp_stream(stream, "ideal:person").await?;
+    ///     let result = socket.send_sync_message(&"1+1").await?;
+    ///     println!("1+1: {}", result);
+    ///     Ok(())
+    /// }
+    /// ```
+    pub async fn from_tcp_stream(mut stream: TcpStream, credential: &str) -> Result<Self> {
+        let is_local = stream.peer_addr()?.ip().is_loopback();
+        handshake(&mut stream, credential, "\x03\x00").await?;
+        Ok(QStream::new(
+            Box::new(stream),
+            ConnectionMethod::TCP,
+            false,
+            is_local,
+        ))
     }
 
     /// Accept connection and does handshake.
@@ -870,7 +903,7 @@ impl MessageHeader {
 
 //%% QStream Connector %%//vvvvvvvvvvvvvvvvvvvvvvvvvv/
 
-/// Inner function of `connect_tcp` and `connect_tls` to establish a TCP connection with the sepcified
+/// Inner function of `QStream::connect` and `connect_tls` to establish a TCP connection with the sepcified
 ///  endpoint. The hostname is resolved to an IP address with a system DNS resolver or parsed directly
 ///  as an IP address.
 ///
@@ -938,20 +971,7 @@ where
     }
 }
 
-/// Connect to q process running on a specified `host` and `port` via TCP with a credential `username:password`.
-/// # Parameters
-/// - `host`: Hostname or IP address of the target q process.
-/// - `port`: Port of the target q process.
-/// - `credential`: Credential in the form of `username:password` to connect to the target q process.
-async fn connect_tcp(host: &str, port: u16, credential: &str) -> Result<TcpStream> {
-    // Connect via TCP
-    let mut socket = connect_tcp_impl(host, port).await?;
-    // Handshake
-    handshake(&mut socket, credential, "\x03\x00").await?;
-    Ok(socket)
-}
-
-/// TLS version of `connect_tcp`.
+/// Connect to q process running on a specified `host` and `port` via TLS with a credential `username:password`.
 /// # Parameters
 /// - `host`: Hostname or IP address of the target q process.
 /// - `port`: Port of the target q process.
